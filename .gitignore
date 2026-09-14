@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.aux.xml
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.zip
+*.log
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
+docs/Manual_Ingreso_Datos_HidroCN_v0.2.0.docx

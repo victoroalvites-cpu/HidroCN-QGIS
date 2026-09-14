@@ -1,0 +1,21 @@
+[general]
+name=HidroCN - Curva Numero
+qgisMinimumVersion=3.28
+qgisMaximumVersion=3.99
+description=Download or build SCS Curve Number maps and compute zonal statistics for watersheds and subbasins.
+version=0.5.0
+author=Victor Olivos
+email=Victoroalvites@gmail.com
+about=HidroCN downloads CN Peru or GCN250 data from Google Earth Engine, or builds a local SCS-CN grid from land use, hydrologic soil group and a HEC-GeoHMS-compatible table. It generates dry, normal and wet conditions, subbasin statistics and traceable outputs. CN Peru is a regional source for Peru. The GEE workflow requires the optional earthengine-api package and a user-authorized Google Cloud project; local calculation works with the NumPy and GDAL libraries bundled with QGIS. / HidroCN descarga CN Peru o GCN250 desde Google Earth Engine, o construye localmente un grid SCS-CN a partir de uso del suelo, grupo hidrologico y una tabla compatible con HEC-GeoHMS.
+category=Raster
+tags=hidrologia,numero de curva,SCS,CN,Google Earth Engine,HEC-HMS,HEC-GeoHMS,uso del suelo,HSG,cuencas
+homepage=https://github.com/victoroalvites-cpu/HidroCN-QGIS#readme
+repository=https://github.com/victoroalvites-cpu/HidroCN-QGIS
+tracker=https://github.com/victoroalvites-cpu/HidroCN-QGIS/issues
+experimental=False
+deprecated=False
+icon=icon.png
+license=GNU GPL v3 or later
+hasProcessingProvider=False
+server=False
+changelog=0.5.0 primera version publica estable. Incluye descarga GEE y calculo local HEC-GeoHMS, catalogos ANA/NUMCURV, formulas ANA para CN-I y CN-III, estadisticas por subunidad, documentacion y metadatos publicos.
