@@ -114,8 +114,9 @@ class GeeServiceOfflineTests(unittest.TestCase):
             return_value={"outputs": []},
         ) as download:
             self.assertEqual(execute(request), {"outputs": []})
-        self.assertEqual(download.call_args.args[-2], subbasins)
-        self.assertEqual(download.call_args.args[-1], "SUB_ID")
+        self.assertEqual(download.call_args.args[-3], subbasins)
+        self.assertEqual(download.call_args.args[-2], "SUB_ID")
+        self.assertTrue(callable(download.call_args.args[-1]))
 
 
 if __name__ == "__main__":

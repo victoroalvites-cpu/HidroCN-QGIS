@@ -9,7 +9,7 @@ import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.5.0"
+VERSION = "0.5.3"
 DIST = ROOT / "dist"
 ZIP_PATH = DIST / f"HidroCN_QGIS_v{VERSION}.zip"
 
@@ -22,6 +22,8 @@ RUNTIME_FILES = (
     "gee_auth_helper.py",
     "gee_worker_helper.py",
     "local_cn_service.py",
+    "raster_blocks.py",
+    "ui_theme.py",
     "metadata.txt",
     "icon.png",
     "LICENSE",
@@ -30,7 +32,7 @@ RUNTIME_FILES = (
     "CONTRIBUTING.md",
     "SECURITY.md",
     "requirements-gee.txt",
-    "docs/Manual_Tecnico_y_de_Usuario_HidroCN_QGIS_v0.5.0.docx",
+    "docs/Manual_Tecnico_y_de_Usuario_HidroCN_QGIS_v0.5.3.docx",
     "core/__init__.py",
     "core/cn_conditions.py",
     "core/cn_catalog.py",
@@ -75,7 +77,10 @@ def build():
         if unexpected:
             raise SystemExit("Archivos prohibidos en ZIP: " + ", ".join(unexpected))
         metadata = archive.read(prefix + "metadata.txt").decode("utf-8")
-        if "version=0.5.0" not in metadata or "experimental=False" not in metadata:
+        packaged_metadata = configparser.ConfigParser()
+        packaged_metadata.read_string(metadata)
+        packaged_general = packaged_metadata["general"]
+        if packaged_general.get("version") != VERSION or packaged_general.getboolean("experimental", fallback=True):
             raise SystemExit("Los metadatos internos del ZIP no son publicables.")
 
     size = ZIP_PATH.stat().st_size

@@ -7,9 +7,14 @@ estadisticas por subcuenca. Incluye dos rutas independientes:
 2. construccion local tipo HEC-GeoHMS mediante uso del suelo, grupo hidrologico
    del suelo y una tabla CN-II.
 
-## Version publica estable 0.5.0
+## Version 0.5.3
 
-- Publicacion estable para QGIS 3.28 a 3.99.
+- Compatible con QGIS 3.28 a 3.99.
+- Estadisticos calculados localmente desde el GeoTIFF final. El progreso indica
+  la etapa interna y el tiempo transcurrido, sin repetir la lectura GDAL.
+- La ruta GEE procesa los bloques sin `osgeo.gdal_array`, para evitar el fallo
+  intermitente de importacion `numpy.core.multiarray` observado en CN-I.
+- Selector de apariencia Sistema, Claro u Oscuro en la cabecera.
 - Metadatos publicos, manual tecnico y de usuario, licencia y canal de incidencias.
 - Conserva las funciones validadas en 0.4.1: descarga desde GEE, calculo local
   tipo HEC-GeoHMS, catalogos ANA/NUMCURV y estadisticas por subunidad.
@@ -99,6 +104,13 @@ con minimo, maximo y porcentaje de cobertura.
 La geometria se envia temporalmente a GEE en WGS 84 y no se registra como
 asset. Los GeoTIFF se descargan en el SRC proyectado elegido y se normalizan con
 NoData real fuera de la cuenca.
+El CSV, el GeoPackage y los metadatos se actualizan despues de cada condicion
+completada. Si se cancela, solo los productos terminados se conservan como
+salidas finales; los metadatos indican `partial` hasta terminar todas las
+condiciones.
+La cobertura global se calcula como pixeles CN validos divididos por los
+pixeles de la cuenca en la malla final. El area de cuenca en km2 se calcula
+con la geometria proyectada al SRC de salida.
 
 ## Dependencias
 
@@ -135,7 +147,7 @@ automatica ni universal con cualquier producto de cobertura.
 
 ## Limitaciones conocidas
 
-- La version 0.5.0 local acepta raster LULC y HSG guardados en disco. Las capas
+- La ruta local acepta raster LULC y HSG guardados en disco. Las capas
   vectoriales deben rasterizarse previamente con sus campos de codigo.
 - La malla usa la extension ajustada a la cuenca, la resolucion elegida y un
   origen alineado a multiplos de esa resolucion; todavia no copia el origen de

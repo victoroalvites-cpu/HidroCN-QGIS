@@ -7,8 +7,8 @@ import os
 import sys
 from pathlib import Path
 
-from qgis.PyQt.QtCore import QSettings, Qt
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import QSettings, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QIcon, QPalette, QPixmap
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -22,7 +22,9 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
+    QScrollArea,
     QApplication,
     QTabWidget,
     QVBoxLayout,
@@ -60,10 +62,12 @@ from .local_cn_service import (
 )
 from .core.local_cn import write_lookup_template
 from .cn_table_dialog import CnTableBuilderDialog
+from .ui_theme import stylesheet
 
 
 class HidroCnDialog(QDialog):
     SETTINGS_PREFIX = "HidroCN"
+    progress_event = pyqtSignal(int, str, float)
 
     def __init__(self, iface, parent=None):
         super().__init__(parent)
@@ -71,25 +75,58 @@ class HidroCnDialog(QDialog):
         self._busy = 0
         self._current_task = None
         self._dependency_available = False
+        self._last_progress_message = ""
         self.setWindowTitle("HidroCN - Curva Numero")
-        self.resize(780, 720)
+        self.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.png"))))
+        self.resize(940, 780)
+        self.setMinimumSize(760, 610)
         self._build_ui()
+        self.progress_event.connect(self._on_progress)
         self._restore_settings()
         self.refresh_layers()
         self._update_dependency_status()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
+        root.setContentsMargins(18, 14, 18, 14)
+        root.setSpacing(10)
 
-        intro = QLabel(
-            "Genera mapas SCS-CN para una cuenca de QGIS: descargados desde Google Earth "
-            "Engine o calculados localmente mediante uso del suelo, grupo hidrologico y una "
-            "tabla compatible con HEC-GeoHMS."
-        )
-        intro.setWordWrap(True)
-        root.addWidget(intro)
+        header = QWidget()
+        header.setObjectName("HidroCNHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        logo = QLabel()
+        logo.setPixmap(QPixmap(str(Path(__file__).with_name("icon.png"))).scaled(
+            60, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        ))
+        header_layout.addWidget(logo)
+        titles = QVBoxLayout()
+        title = QLabel("HIDROCN")
+        title.setObjectName("HidroCNTitle")
+        subtitle = QLabel("Curva Número SCS · mapas y estadísticas por subcuenca")
+        subtitle.setObjectName("HidroCNSubtitle")
+        titles.addWidget(title)
+        titles.addWidget(subtitle)
+        header_layout.addLayout(titles)
+        header_layout.addStretch(1)
+        header_layout.addWidget(QLabel("Apariencia"))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(["Sistema", "Claro", "Oscuro"])
+        self.theme_combo.setToolTip("Cambia solo la apariencia de HidroCN")
+        header_layout.addWidget(self.theme_combo)
+        root.addWidget(header)
 
-        basin_group = QGroupBox("1. Cuenca en estudio")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        content.setObjectName("HidroCNContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(2, 4, 2, 4)
+        content_layout.setSpacing(12)
+        scroll.setWidget(content)
+        root.addWidget(scroll, 1)
+
+        basin_group = QGroupBox("01  Cuenca en estudio")
         basin_form = QFormLayout(basin_group)
         self.basin_combo = QgsMapLayerComboBox()
         self.basin_combo.setFilters(QgsMapLayerProxyModel.PolygonLayer)
@@ -106,13 +143,13 @@ class HidroCnDialog(QDialog):
         basin_form.addRow("Identificador de subunidad", self.local_id_combo)
         basin_form.addRow("", self.selected_only_check)
         basin_form.addRow("", basin_buttons)
-        root.addWidget(basin_group)
+        content_layout.addWidget(basin_group)
 
         self.method_tabs = QTabWidget()
         gee_tab = QWidget()
         gee_layout = QVBoxLayout(gee_tab)
 
-        gee_group = QGroupBox("2. Google Earth Engine")
+        gee_group = QGroupBox("02  Conexión con Google Earth Engine")
         gee_form = QFormLayout(gee_group)
         self.project_edit = QLineEdit()
         self.project_edit.setPlaceholderText("Ejemplo: ee-mi-proyecto")
@@ -132,7 +169,7 @@ class HidroCnDialog(QDialog):
         gee_form.addRow("Estado", self.connection_status)
         gee_layout.addWidget(gee_group)
 
-        source_group = QGroupBox("3. Fuente y condiciones antecedentes")
+        source_group = QGroupBox("03  Fuente y condiciones antecedentes")
         source_form = QFormLayout(source_group)
         self.source_combo = QComboBox()
         for key, definition in SOURCE_CATALOG.items():
@@ -170,7 +207,7 @@ class HidroCnDialog(QDialog):
         gee_outputs.setWordWrap(True)
         gee_layout.addWidget(gee_outputs)
         gee_layout.addStretch(1)
-        self.method_tabs.addTab(gee_tab, "Desde GEE")
+        self.method_tabs.addTab(gee_tab, "GEE · Descargar")
 
         local_tab = QWidget()
         local_layout = QVBoxLayout(local_tab)
@@ -217,10 +254,10 @@ class HidroCnDialog(QDialog):
         local_outputs.setWordWrap(True)
         local_layout.addWidget(local_outputs)
         local_layout.addStretch(1)
-        self.method_tabs.addTab(local_tab, "Calculo local HEC-GeoHMS")
-        root.addWidget(self.method_tabs)
+        self.method_tabs.addTab(local_tab, "CN local · HEC-GeoHMS")
+        content_layout.addWidget(self.method_tabs)
 
-        output_group = QGroupBox("4. Salida proyectada")
+        output_group = QGroupBox("04  Salida proyectada")
         output_form = QFormLayout(output_group)
         self.crs_widget = QgsProjectionSelectionWidget()
         project_crs = QgsProject.instance().crs()
@@ -253,19 +290,31 @@ class HidroCnDialog(QDialog):
         output_form.addRow("Carpeta", folder_row)
         output_form.addRow("Prefijo", self.prefix_edit)
         output_form.addRow("", self.add_results_check)
-        root.addWidget(output_group)
+        content_layout.addWidget(output_group)
+        content_layout.addStretch(1)
+
+        self.progress_label = QLabel("Listo para procesar")
+        self.progress_label.setObjectName("HidroCNProgressLabel")
+        root.addWidget(self.progress_label)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        root.addWidget(self.progress_bar)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
-        self.log.setMinimumHeight(130)
-        root.addWidget(QLabel("Registro"))
-        root.addWidget(self.log, 1)
+        self.log.setMinimumHeight(100)
+        self.log.setMaximumHeight(145)
+        root.addWidget(QLabel("Registro de ejecución"))
+        root.addWidget(self.log)
 
         buttons = QHBoxLayout()
         self.cancel_button = QPushButton("Cancelar operacion")
         self.cancel_button.setEnabled(False)
         self.download_button = QPushButton("Descargar CN")
+        self.download_button.setProperty("role", "primary")
         self.local_calculate_button = QPushButton("Construir CN local")
+        self.local_calculate_button.setProperty("role", "primary")
         self.close_button = QPushButton("Cerrar")
         buttons.addWidget(self.cancel_button)
         buttons.addStretch(1)
@@ -292,6 +341,7 @@ class HidroCnDialog(QDialog):
         self.basin_combo.layerChanged.connect(self._update_id_fields)
         self.cancel_button.clicked.connect(self._cancel_current_task)
         self.close_button.clicked.connect(self.close)
+        self.theme_combo.currentTextChanged.connect(self._apply_theme)
         self._source_changed()
         self._update_id_fields()
 
@@ -317,11 +367,36 @@ class HidroCnDialog(QDialog):
         self.output_folder_edit.setText(
             settings.value(f"{self.SETTINGS_PREFIX}/output_folder", default_output, str)
         )
+        saved_theme = settings.value(f"{self.SETTINGS_PREFIX}/theme", "Sistema", str)
+        self.theme_combo.setCurrentText(saved_theme if saved_theme in ("Sistema", "Claro", "Oscuro") else "Sistema")
+        self._apply_theme()
 
     def _save_settings(self):
         settings = QSettings()
         settings.setValue(f"{self.SETTINGS_PREFIX}/project_id", self.project_edit.text().strip())
         settings.setValue(f"{self.SETTINGS_PREFIX}/output_folder", self.output_folder_edit.text().strip())
+
+    def _apply_theme(self, *_args):
+        choice = self.theme_combo.currentText()
+        dark = choice == "Oscuro" or (
+            choice == "Sistema" and QApplication.palette().color(QPalette.Window).lightness() < 128
+        )
+        self.setStyleSheet(stylesheet(dark))
+        QSettings().setValue(f"{self.SETTINGS_PREFIX}/theme", choice)
+
+    def _on_progress(self, percent, message, elapsed):
+        self.progress_bar.setValue(max(0, min(100, percent)))
+        self.progress_label.setText(message)
+        if message != self._last_progress_message:
+            self._append_log(f"[{elapsed:.1f} s] {message}")
+            self._last_progress_message = message
+
+    def _report_task_progress(self, task, event):
+        percent = int(event.get("percent", 0))
+        task.setProgress(percent)
+        self.progress_event.emit(
+            percent, str(event.get("message", "")), float(event.get("elapsed_seconds", 0.0))
+        )
 
     def _update_dependency_status(self):
         status = dependency_status()
@@ -366,6 +441,21 @@ class HidroCnDialog(QDialog):
         self.local_template_button.setEnabled(self._busy == 0)
         self.local_catalog_button.setEnabled(self._busy == 0)
         self.cancel_button.setEnabled(self._busy > 0)
+        self.close_button.setEnabled(self._busy == 0)
+        for widget in (
+            self.basin_combo, self.local_id_combo, self.selected_only_check,
+            self.active_layer_button, self.validate_button, self.method_tabs,
+            self.project_edit, self.source_combo, self.custom_asset_edit,
+            self.custom_band_edit, self.dry_check, self.normal_check, self.wet_check,
+            self.local_lulc_combo, self.local_hsg_combo, self.local_lookup_edit,
+            self.local_dry_check, self.local_normal_check, self.local_wet_check,
+            self.crs_widget, self.suggest_utm_button, self.scale_spin,
+            self.output_folder_edit, self.output_folder_button, self.prefix_edit,
+            self.add_results_check,
+        ):
+            widget.setEnabled(self._busy == 0)
+        if self._busy == 0:
+            self._source_changed()
 
     def _set_busy(self, busy):
         self._busy += 1 if busy else -1
@@ -378,6 +468,9 @@ class HidroCnDialog(QDialog):
     def _task(self, description, function, finished):
         self._set_busy(True)
         self._append_log(description + "...")
+        self._last_progress_message = ""
+        self.progress_bar.setValue(0)
+        self.progress_label.setText(description + "...")
 
         def worker(task):
             if task.isCanceled():
@@ -388,14 +481,22 @@ class HidroCnDialog(QDialog):
             self._set_busy(False)
             self._current_task = None
             if exception is not None:
+                if task.isCanceled():
+                    self.progress_label.setText("Operación cancelada. Se conservaron los productos completos.")
+                    self._append_log("Operación cancelada. Los productos completos permanecen en la carpeta de salida.")
+                    return
+                self.progress_label.setText("Error: revise el registro")
                 self._append_log("ERROR: " + str(exception))
                 QMessageBox.critical(self, "HidroCN", str(exception))
                 return
             if result is None:
+                self.progress_label.setText("Operación cancelada")
                 self._append_log("Operacion cancelada.")
                 return
             try:
                 finished(result)
+                self.progress_bar.setValue(100)
+                self.progress_label.setText("Operación completada")
             except Exception as error:
                 self._append_log("ERROR: " + str(error))
                 QMessageBox.critical(self, "HidroCN", str(error))
@@ -407,6 +508,8 @@ class HidroCnDialog(QDialog):
     def _cancel_current_task(self):
         if self._current_task is not None:
             self._append_log("Cancelando operacion...")
+            self.progress_label.setText("Cancelando operación...")
+            self.cancel_button.setEnabled(False)
             self._current_task.cancel()
 
     def _selected_project(self):
@@ -649,6 +752,7 @@ class HidroCnDialog(QDialog):
             return
         default_folder = self.output_folder_edit.text().strip() or str(Path.home())
         dialog = CnTableBuilderDialog(codes, default_folder, self)
+        dialog.setStyleSheet(self.styleSheet())
         if dialog.exec() == QDialog.Accepted and dialog.output_path:
             self.local_lookup_edit.setText(dialog.output_path)
             self._append_log(
@@ -916,10 +1020,18 @@ class HidroCnDialog(QDialog):
         self._task(
             "Descargando mapas CN",
             lambda task: run_gee_external(
-                "download", payload, timeout_seconds=900, cancel_check=task.isCanceled
+                "download", payload, timeout_seconds=900, cancel_check=task.isCanceled,
+                progress_callback=lambda event: self._report_task_progress(task, event),
             ),
             done,
         )
+
+    def closeEvent(self, event):
+        if self._busy:
+            self._cancel_current_task()
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     @staticmethod
     def _format_number(value):

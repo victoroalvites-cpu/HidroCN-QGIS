@@ -8,7 +8,10 @@ PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
 class PackageLayoutTests(unittest.TestCase):
     def test_required_qgis_plugin_files_exist(self):
-        for name in ("__init__.py", "metadata.txt", "plugin.py", "dialog.py", "icon.png"):
+        for name in (
+            "__init__.py", "metadata.txt", "plugin.py", "dialog.py", "icon.png",
+            "ui_theme.py", "raster_blocks.py",
+        ):
             with self.subTest(name=name):
                 self.assertTrue((PLUGIN_ROOT / name).is_file())
 
@@ -16,7 +19,7 @@ class PackageLayoutTests(unittest.TestCase):
         parser = configparser.ConfigParser()
         parser.read(PLUGIN_ROOT / "metadata.txt", encoding="utf-8")
         general = parser["general"]
-        self.assertEqual(general["version"], "0.5.0")
+        self.assertEqual(general["version"], "0.5.3")
         self.assertEqual(general["qgisMinimumVersion"], "3.28")
         self.assertEqual(general["qgisMaximumVersion"], "3.99")
         self.assertEqual(general["experimental"], "False")

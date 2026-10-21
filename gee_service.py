@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
+from .raster_blocks import read_float64_block, write_float64_block
+
 
 CN_PERU_ASSET = "projects/ee-mportuguezm/assets/CN_Peru"  # pragma: allowlist secret
 GCN250_AVERAGE_ASSET = "users/jaafarhadi/GCN250/GCN250Average"
@@ -214,6 +216,7 @@ def run_gee_external(
     payload: Mapping[str, object],
     timeout_seconds: float = 600.0,
     cancel_check=None,
+    progress_callback=None,
 ):
     helper = Path(__file__).with_name("gee_worker_helper.py")
     python_executable = Path(sys.prefix) / ("python.exe" if os.name == "nt" else "bin/python")
@@ -225,24 +228,67 @@ def run_gee_external(
     with tempfile.TemporaryDirectory(prefix="hidrocn_gee_") as folder:
         request_path = Path(folder) / "request.json"
         response_path = Path(folder) / "response.json"
+        progress_path = Path(folder) / "progress.jsonl"
+        stdout_path = Path(folder) / "stdout.log"
+        stderr_path = Path(folder) / "stderr.log"
         request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-        process = subprocess.Popen(  # nosec B603 - argumentos cerrados, sin shell
-            [str(python_executable), str(helper), str(request_path), str(response_path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            creationflags=creationflags,
-        )
-        started = time.monotonic()
-        while process.poll() is None:
-            if cancel_check is not None and cancel_check():
+        stdout_file = stdout_path.open("wb")
+        stderr_file = stderr_path.open("wb")
+        try:
+            process = subprocess.Popen(  # nosec B603 - argumentos cerrados, sin shell
+                [str(python_executable), str(helper), str(request_path), str(response_path)],
+                stdout=stdout_file,
+                stderr=stderr_file,
+                creationflags=creationflags,
+            )
+            started = time.monotonic()
+            progress_offset = 0
+
+            def read_progress():
+                nonlocal progress_offset
+                if progress_callback is None or not progress_path.is_file():
+                    return
+                with progress_path.open("r", encoding="utf-8") as stream:
+                    stream.seek(progress_offset)
+                    while True:
+                        line_start = stream.tell()
+                        line = stream.readline()
+                        if not line:
+                            break
+                        if not line.endswith("\n"):
+                            stream.seek(line_start)
+                            break
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        progress_callback(event)
+                    progress_offset = stream.tell()
+
+            def stop_process():
                 process.terminate()
-                raise GeeError("Operacion Earth Engine cancelada por el usuario.")
-            if time.monotonic() - started > timeout_seconds:
-                process.terminate()
-                raise GeeError("La operacion Earth Engine supero el tiempo permitido.")
-            time.sleep(0.2)
-        stdout, stderr = process.communicate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+            while process.poll() is None:
+                read_progress()
+                if cancel_check is not None and cancel_check():
+                    stop_process()
+                    raise GeeError("Operacion Earth Engine cancelada por el usuario.")
+                if time.monotonic() - started > timeout_seconds:
+                    stop_process()
+                    raise GeeError("La operacion Earth Engine supero el tiempo permitido.")
+                time.sleep(0.2)
+            process.wait()
+        finally:
+            stdout_file.close()
+            stderr_file.close()
+        stdout = stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr = stderr_path.read_text(encoding="utf-8", errors="replace")
+        read_progress()
         if not response_path.is_file():
             detail = (stderr or stdout or "El proceso externo no genero respuesta.").strip()
             raise GeeError(f"Fallo el proceso externo de Earth Engine: {detail[-2000:]}")
@@ -250,6 +296,8 @@ def run_gee_external(
         if process.returncode != 0 or not response.get("ok"):
             error_type = response.get("error_type", "Error")
             detail = response.get("error") or stderr or stdout or "Sin detalle"
+            if stderr and stderr.strip() not in str(detail):
+                detail = f"{detail} | Diagnostico del proceso: {stderr.strip()[-2000:]}"
             raise GeeError(f"{error_type}: {detail}")
         return response.get("result")
 
@@ -384,7 +432,7 @@ def _validated_gee_download_url(url: str) -> str:
 def _download_url_to_tif(url: str, destination: Path) -> None:
     part = destination.with_suffix(destination.suffix + ".part")
     safe_url = _validated_gee_download_url(url)
-    request = urllib.request.Request(safe_url, headers={"User-Agent": "HidroCN-QGIS/0.5.0"})
+    request = urllib.request.Request(safe_url, headers={"User-Agent": "HidroCN-QGIS/0.5.3"})
     try:
         # B310: safe_url ya exige HTTPS y un dominio de descarga de Google.
         with urllib.request.urlopen(request, timeout=300) as response, part.open("wb") as output:  # nosec B310
@@ -419,6 +467,7 @@ def normalize_geotiff_nodata(
     path: str,
     geometry_geojson: Optional[Mapping[str, object]] = None,
     nodata: float = -9999.0,
+    progress_callback=None,
 ) -> dict[str, object]:
     """Recorta localmente la cuenca y declara NoData GDAL real.
 
@@ -429,6 +478,11 @@ def normalize_geotiff_nodata(
     la cuadricula descargada y la normalizacion se hace por bloques.
     """
 
+    def report(stage):
+        if progress_callback is not None:
+            progress_callback(stage)
+
+    report("cargando GDAL y NumPy")
     try:
         import numpy as np
         from osgeo import gdal, ogr, osr
@@ -440,6 +494,7 @@ def normalize_geotiff_nodata(
     if hasattr(gdal, "UseExceptions"):
         gdal.UseExceptions()
 
+    report("abriendo el GeoTIFF")
     target = Path(path)
     dataset = gdal.Open(str(target), gdal.GA_Update)
     if dataset is None:
@@ -447,8 +502,15 @@ def normalize_geotiff_nodata(
     geometry_mask_dataset = None
     vector_dataset = None
     replaced = 0
+    valid_count = 0
+    inside_count = 0
+    value_sum = 0.0
+    minimum = math.inf
+    maximum = -math.inf
+    basin_area_km2 = None
     try:
         if geometry_geojson:
+            report("preparando la mascara de la cuenca")
             geometry = ogr.CreateGeometryFromJson(json.dumps(dict(geometry_geojson)))
             if geometry is None or geometry.IsEmpty():
                 raise GeeError("GDAL no pudo interpretar la geometria GeoJSON de la cuenca.")
@@ -460,6 +522,7 @@ def normalize_geotiff_nodata(
                 source_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
                 target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
             geometry.Transform(osr.CoordinateTransformation(source_srs, target_srs))
+            basin_area_km2 = geometry.GetArea() / 1_000_000.0
 
             geometry_mask_dataset = gdal.GetDriverByName("MEM").Create(
                 "", dataset.RasterXSize, dataset.RasterYSize, 1, gdal.GDT_Byte
@@ -485,6 +548,7 @@ def normalize_geotiff_nodata(
                 burn_values=[1],
             )
 
+        report("leyendo pixeles y calculando estadisticos")
         for band_index in range(1, dataset.RasterCount + 1):
             band = dataset.GetRasterBand(band_index)
             block_x, block_y = band.GetBlockSize()
@@ -494,63 +558,55 @@ def normalize_geotiff_nodata(
                 rows = min(block_y, dataset.RasterYSize - y_offset)
                 for x_offset in range(0, dataset.RasterXSize, block_x):
                     columns = min(block_x, dataset.RasterXSize - x_offset)
-                    values = band.ReadAsArray(x_offset, y_offset, columns, rows)
-                    if values is None:
-                        raise GeeError("GDAL no pudo leer un bloque del GeoTIFF descargado.")
+                    values = read_float64_block(
+                        band, x_offset, y_offset, columns, rows, np, gdal
+                    )
                     invalid = (~np.isfinite(values)) | (values <= 0) | (values > 100)
                     if geometry_mask_dataset is not None:
-                        inside = geometry_mask_dataset.GetRasterBand(1).ReadAsArray(
-                            x_offset, y_offset, columns, rows
+                        inside = read_float64_block(
+                            geometry_mask_dataset.GetRasterBand(1),
+                            x_offset, y_offset, columns, rows, np, gdal,
                         )
+                        inside_count += int(np.count_nonzero(inside))
                         invalid |= inside == 0
+                    else:
+                        inside_count += int(values.size)
+                    valid = values[~invalid]
+                    if valid.size:
+                        valid_count += int(valid.size)
+                        value_sum += float(valid.sum(dtype=np.float64))
+                        minimum = min(minimum, float(valid.min()))
+                        maximum = max(maximum, float(valid.max()))
                     count = int(np.count_nonzero(invalid))
                     if count:
                         values[invalid] = nodata
-                        band.WriteArray(values, x_offset, y_offset)
+                        write_float64_block(band, x_offset, y_offset, values, gdal)
                         replaced += count
             band.SetNoDataValue(float(nodata))
             band.FlushCache()
-            band.ComputeStatistics(False)
+        # Los estadisticos ya se calcularon sobre los pixeles validos. Una
+        # segunda lectura completa con ComputeStatistics puede bloquearse en
+        # algunos GeoTIFF abiertos en modo de actualizacion y no aporta datos.
+        report("guardando NoData y cerrando el GeoTIFF")
         dataset.FlushCache()
     finally:
         dataset = None
         geometry_mask_dataset = None
         vector_dataset = None
-    return {"path": str(target), "nodata": float(nodata), "replaced_pixels": replaced}
-
-
-def _image_statistics(
-    ee, image, geometry, scale: float, output_crs: str
-) -> dict[str, Optional[float]]:
-    band_name = image.bandNames().get(0).getInfo()
-    reducer = ee.Reducer.minMax().combine(
-        reducer2=ee.Reducer.mean(), sharedInputs=True
-    )
-    values = image.reduceRegion(
-        reducer=reducer,
-        geometry=geometry,
-        scale=scale,
-        crs=output_crs,
-        maxPixels=1e13,
-        tileScale=4,
-    ).getInfo()
-    valid_area_value = ee.Image.pixelArea().updateMask(image.mask()).reduceRegion(
-        reducer=ee.Reducer.sum(),
-        geometry=geometry,
-        scale=scale,
-        crs=output_crs,
-        maxPixels=1e13,
-        tileScale=4,
-    ).getInfo()
-    total_area = float(geometry.area(maxError=1).getInfo())
-    valid_area = float(next(iter(valid_area_value.values()), 0.0) or 0.0)
-    coverage = 100.0 * valid_area / total_area if total_area > 0 else 0.0
+    report("estadisticos locales terminados")
     return {
-        "minimum": values.get(f"{band_name}_min"),
-        "maximum": values.get(f"{band_name}_max"),
-        "mean": values.get(f"{band_name}_mean"),
-        "coverage_pct": min(100.0, coverage),
-        "basin_area_km2": total_area / 1_000_000.0,
+        "path": str(target),
+        "nodata": float(nodata),
+        "replaced_pixels": replaced,
+        "statistics": {
+            "minimum": minimum if valid_count else None,
+            "maximum": maximum if valid_count else None,
+            "mean": value_sum / valid_count if valid_count else None,
+            "coverage_pct": 100.0 * valid_count / inside_count if inside_count else 0.0,
+            "basin_area_km2": basin_area_km2,
+            "valid_pixels": valid_count,
+            "basin_pixels": inside_count,
+        },
     }
 
 
@@ -566,6 +622,7 @@ def download_cn_products(
     custom_band: str = "",
     subbasins: Optional[Sequence[Mapping[str, object]]] = None,
     subbasin_id_field: str = "",
+    progress_callback=None,
 ) -> dict[str, object]:
     ee = _load_ee()
     definition = _source(source_key, custom_asset, custom_band)
@@ -587,12 +644,43 @@ def download_cn_products(
     output_dir.mkdir(parents=True, exist_ok=True)
     file_prefix = _safe_prefix(prefix)
     outputs = []
+    metadata_path = _available_path(output_dir / f"{file_prefix}_CN_metadatos.json")
+    statistics_csv = _available_path(output_dir / f"{file_prefix}_CN_por_subcuenca.csv") if subbasins else None
+    subbasins_gpkg = _available_path(output_dir / f"{file_prefix}_subcuencas_CN.gpkg") if subbasins else None
+    areal_result = None
 
-    for condition in selected_conditions:
+    def report(percent, message):
+        if progress_callback is not None:
+            progress_callback(int(percent), str(message))
+
+    def save_metadata(status):
+        metadata = {
+            "schema": 2,
+            "application": "HidroCN - Curva Numero",
+            "version": "0.5.3",
+            "status": status,
+            "source_key": definition.key,
+            "source_label": definition.label,
+            "source_notes": definition.notes,
+            "output_crs": crs,
+            "scale_m": scale,
+            "statistics_method": "local_final_geotiff",
+            "coverage_pct_definition": "valid_pixels / basin_pixels on the output grid",
+            "conditions": outputs,
+            "subbasin_id_field": subbasin_id_field,
+            "subbasin_statistics": areal_result["rows"] if areal_result else [],
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    for index, condition in enumerate(selected_conditions):
+        base_progress = 100.0 * index / len(selected_conditions)
+        step = 100.0 / len(selected_conditions)
+        report(base_progress, f"CN-{condition}: preparando imagen en Earth Engine")
         image, asset, derived = _condition_image(ee, definition, condition)
         image = image.updateMask(image.gt(0).And(image.lte(100))).clip(geometry)
         filename = f"{file_prefix}_CN_{condition}_{CONDITION_NAMES[condition]}.tif"
         target = _available_path(output_dir / filename)
+        staged = target.with_suffix(target.suffix + ".processing")
         params = {
             "name": target.stem,
             "region": geometry,
@@ -601,16 +689,32 @@ def download_cn_products(
             "format": "GEO_TIFF",
             "filePerBand": False,
         }
+        stage = "generando la descarga"
         try:
+            report(base_progress + step * 0.15, f"CN-{condition}: generando enlace de descarga")
             url = image.getDownloadURL(params)
-            _download_url_to_tif(url, target)
-            nodata_info = normalize_geotiff_nodata(str(target), geometry_geojson)
-            statistics = _image_statistics(ee, image, geometry, scale, crs)
+            stage = "transfiriendo el GeoTIFF"
+            report(base_progress + step * 0.35, f"CN-{condition}: transfiriendo GeoTIFF")
+            _download_url_to_tif(url, staged)
+            stage = "normalizando el raster"
+            report(base_progress + step * 0.55, f"CN-{condition}: normalizando NoData y calculando estadisticos locales")
+            nodata_info = normalize_geotiff_nodata(
+                str(staged),
+                geometry_geojson,
+                progress_callback=lambda stage: report(
+                    base_progress + step * 0.6,
+                    f"CN-{condition}: {stage}",
+                ),
+            )
+            statistics = nodata_info["statistics"]
+            staged.replace(target)
+            nodata_info["path"] = str(target)
         except Exception as error:
-            target.unlink(missing_ok=True)
+            staged.unlink(missing_ok=True)
+            staged.with_suffix(staged.suffix + ".part").unlink(missing_ok=True)
             raise GeeError(
-                f"No se pudo descargar CN-{condition}. La descarga directa de GEE tiene limites de "
-                f"tamano; reduzca el area o aumente la resolucion si el mensaje indica exceso. Detalle: {error}"
+                f"No se pudo completar CN-{condition} mientras se estaba {stage}. "
+                f"Detalle: {error}"
             ) from error
         outputs.append(
             {
@@ -621,45 +725,39 @@ def download_cn_products(
                 "derived": derived,
                 "formula": ANA_FORMULAS.get(condition) if derived else None,
                 "statistics": statistics,
-                "nodata": nodata_info,
+                "nodata": {key: value for key, value in nodata_info.items() if key != "statistics"},
             }
         )
+        save_metadata("partial")
+        if subbasins:
+            report(base_progress + step * 0.8, f"CN-{condition}: calculando resumen por subcuenca")
+            try:
+                from .local_cn_service import summarize_cn_rasters
 
-    areal_result = None
-    if subbasins:
-        try:
-            from .local_cn_service import summarize_cn_rasters
+                temporary_csv = statistics_csv.with_name(statistics_csv.stem + ".processing.csv")
+                temporary_gpkg = subbasins_gpkg.with_name(subbasins_gpkg.stem + ".processing.gpkg")
+                temporary_csv.unlink(missing_ok=True)
+                temporary_gpkg.unlink(missing_ok=True)
+                partial = summarize_cn_rasters(
+                    subbasins, outputs, crs, temporary_csv, temporary_gpkg
+                )
+                temporary_csv.replace(statistics_csv)
+                temporary_gpkg.replace(subbasins_gpkg)
+                areal_result = {
+                    **partial,
+                    "statistics_csv": str(statistics_csv),
+                    "subbasins_gpkg": str(subbasins_gpkg),
+                }
+                save_metadata("partial")
+            except Exception as error:
+                raise GeeError(
+                    "El raster y sus estadisticos locales se guardaron, pero fallo el "
+                    f"resumen por subcuenca. Detalle: {error}"
+                ) from error
+        report(base_progress + step, f"CN-{condition}: raster y estadisticos guardados")
 
-            statistics_csv = _available_path(output_dir / f"{file_prefix}_CN_por_subcuenca.csv")
-            subbasins_gpkg = _available_path(output_dir / f"{file_prefix}_subcuencas_CN.gpkg")
-            areal_result = summarize_cn_rasters(
-                subbasins,
-                outputs,
-                crs,
-                statistics_csv,
-                subbasins_gpkg,
-            )
-        except Exception as error:
-            raise GeeError(
-                "Los raster se descargaron, pero no fue posible calcular las estadisticas "
-                f"por subunidad. Detalle: {error}"
-            ) from error
-
-    metadata = {
-        "schema": 2,
-        "application": "HidroCN - Curva Numero",
-        "version": "0.5.0",
-        "source_key": definition.key,
-        "source_label": definition.label,
-        "source_notes": definition.notes,
-        "output_crs": crs,
-        "scale_m": scale,
-        "conditions": outputs,
-        "subbasin_id_field": subbasin_id_field,
-        "subbasin_statistics": areal_result["rows"] if areal_result else [],
-    }
-    metadata_path = _available_path(output_dir / f"{file_prefix}_CN_metadatos.json")
-    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    save_metadata("complete")
+    report(100, "Todos los productos CN estan completos")
     result = {"outputs": outputs, "metadata_path": str(metadata_path)}
     if areal_result:
         result.update(

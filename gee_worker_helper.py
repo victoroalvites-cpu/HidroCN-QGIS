@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 
@@ -16,6 +17,22 @@ from hidro_cn_qgis.gee_service import download_cn_products, initialize_ee, inspe
 def execute(request):
     operation = request.get("operation")
     project = request.get("project_id", "")
+    progress_path_value = request.get("progress_path")
+    started = time.monotonic()
+
+    def progress(percent, message):
+        if not progress_path_value:
+            return
+        event = {
+            "percent": percent,
+            "message": message,
+            "elapsed_seconds": round(time.monotonic() - started, 2),
+        }
+        with Path(progress_path_value).open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    if operation == "download":
+        progress(0, "Conectando con Earth Engine")
     connection = initialize_ee(project)
     if operation == "initialize":
         return connection
@@ -38,6 +55,7 @@ def execute(request):
             request.get("custom_band", ""),
             request.get("features") or [],
             request.get("id_field", ""),
+            progress,
         )
     raise ValueError(f"Operacion externa desconocida: {operation!r}.")
 
@@ -47,6 +65,7 @@ def main():
     response_path = Path(sys.argv[2])
     try:
         request = json.loads(request_path.read_text(encoding="utf-8"))
+        request["progress_path"] = str(request_path.with_name("progress.jsonl"))
         response = {"ok": True, "result": execute(request)}
         code = 0
     except Exception as error:

@@ -87,7 +87,19 @@ def main():
                 "type": "Polygon",
                 "coordinates": [[[2, 0], [4, 0], [4, 2], [2, 2], [2, 0]]],
             }
-            result = normalize_geotiff_nodata(str(raster_path), right_half)
+            original_read_array = gdal.Band.ReadAsArray
+            original_write_array = gdal.Band.WriteArray
+
+            def unavailable_array_bridge(*_args, **_kwargs):
+                raise ImportError("numpy.core.multiarray failed to import")
+
+            gdal.Band.ReadAsArray = unavailable_array_bridge
+            gdal.Band.WriteArray = unavailable_array_bridge
+            try:
+                result = normalize_geotiff_nodata(str(raster_path), right_half)
+            finally:
+                gdal.Band.ReadAsArray = original_read_array
+                gdal.Band.WriteArray = original_write_array
             dataset = gdal.Open(str(raster_path))
             band = dataset.GetRasterBand(1)
             values = band.ReadAsArray()
@@ -162,16 +174,20 @@ def main():
             assert Path(local_result["subbasins_gpkg"]).is_file()
             metadata = json.loads(Path(local_result["metadata_path"]).read_text(encoding="utf-8"))
             assert len(metadata["subbasin_statistics"]) == 2
-            gee_summary = summarize_cn_rasters(
-                [
-                    {"id": "Oeste", "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]}},
-                    {"id": "Este", "geometry": {"type": "Polygon", "coordinates": [[[2, 0], [4, 0], [4, 2], [2, 2], [2, 0]]]}},
-                ],
-                local_result["outputs"],
-                "EPSG:32718",
-                folder / "gee_CN_por_subcuenca.csv",
-                folder / "gee_subcuencas_CN.gpkg",
-            )
+            gdal.Band.ReadAsArray = unavailable_array_bridge
+            try:
+                gee_summary = summarize_cn_rasters(
+                    [
+                        {"id": "Oeste", "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [2, 0], [2, 2], [0, 2], [0, 0]]]}},
+                        {"id": "Este", "geometry": {"type": "Polygon", "coordinates": [[[2, 0], [4, 0], [4, 2], [2, 2], [2, 0]]]}},
+                    ],
+                    local_result["outputs"],
+                    "EPSG:32718",
+                    folder / "gee_CN_por_subcuenca.csv",
+                    folder / "gee_subcuencas_CN.gpkg",
+                )
+            finally:
+                gdal.Band.ReadAsArray = original_read_array
             assert len(gee_summary["rows"]) == 2
             assert abs(gee_summary["rows"][0]["CN_II_MEAN"] - (137.0 / 3.0)) < 1e-6
             assert gee_summary["rows"][0]["CN_II_COV"] == 75.0

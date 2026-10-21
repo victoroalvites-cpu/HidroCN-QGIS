@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .core.local_cn import build_cn_arrays, read_lookup_csv
+from .raster_blocks import read_float64_block
 
 
 NODATA = -9999.0
@@ -371,7 +372,7 @@ def summarize_cn_rasters(features, outputs, output_crs, csv_path, gpkg_path):
     zonal = {condition: {} for condition in conditions}
     zone_totals = {}
 
-    with tempfile.TemporaryDirectory(prefix="hidrocn_gee_zonal_") as folder:
+    with tempfile.TemporaryDirectory(prefix="hidrocn_gee_zonal_", dir=Path(csv_path).parent) as folder:
         zone_path = Path(folder) / "subunidades.tif"
         zone_dataset = gdal.GetDriverByName("GTiff").Create(
             str(zone_path), columns, rows_count, 1, gdal.GDT_Int32,
@@ -395,8 +396,9 @@ def summarize_cn_rasters(features, outputs, output_crs, csv_path, gpkg_path):
             height = min(block_y, rows_count - y_offset)
             for x_offset in range(0, columns, block_x):
                 width = min(block_x, columns - x_offset)
-                zones = zone_dataset.GetRasterBand(1).ReadAsArray(
-                    x_offset, y_offset, width, height
+                zones = read_float64_block(
+                    zone_dataset.GetRasterBand(1),
+                    x_offset, y_offset, width, height, np, gdal,
                 )
                 for zone_id in np.unique(zones[zones > 0]):
                     integer_id = int(zone_id)
@@ -419,10 +421,13 @@ def summarize_cn_rasters(features, outputs, output_crs, csv_path, gpkg_path):
                 height = min(block_y, rows_count - y_offset)
                 for x_offset in range(0, columns, block_x):
                     width = min(block_x, columns - x_offset)
-                    zones = zone_dataset.GetRasterBand(1).ReadAsArray(
-                        x_offset, y_offset, width, height
+                    zones = read_float64_block(
+                        zone_dataset.GetRasterBand(1),
+                        x_offset, y_offset, width, height, np, gdal,
                     )
-                    values = band.ReadAsArray(x_offset, y_offset, width, height)
+                    values = read_float64_block(
+                        band, x_offset, y_offset, width, height, np, gdal
+                    )
                     valid = (zones > 0) & np.isfinite(values) & (values > 0) & (values <= 100)
                     if nodata is not None:
                         valid &= ~np.isclose(values, nodata, atol=1e-6)
